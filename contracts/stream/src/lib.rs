@@ -3,6 +3,20 @@
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub token: Address,
+    pub admin: Address,
+}
+
+#[contracttype]
+pub enum DataKey {
+    Config,
+    NextStreamId,
+    Stream(u64),
+}
+
+#[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamStatus {
     Active = 0,
@@ -32,24 +46,50 @@ pub struct FluxoraStream;
 #[contractimpl]
 impl FluxoraStream {
     /// Initialize the stream contract (e.g. set token and admin).
-    pub fn init(env: Env, _token: Address, _admin: Address) -> () {
-        // Store token and admin for create_stream, pause, cancel, etc.
-        ()
+    pub fn init(env: Env, token: Address, admin: Address) -> () {
+        if env.storage().instance().has(&DataKey::Config) {
+            panic!("Already initialized");
+        }
+        let config = Config { token, admin };
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.storage().instance().set(&DataKey::NextStreamId, &1u64);
     }
 
     /// Create a new stream. Treasury locks USDC and sets rate, duration, cliff.
     pub fn create_stream(
-        _env: Env,
-        _sender: Address,
-        _recipient: Address,
-        _deposit_amount: i128,
-        _rate_per_second: i128,
-        _start_time: u64,
-        _cliff_time: u64,
-        _end_time: u64,
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
     ) -> u64 {
-        // TODO: transfer USDC from sender to contract, persist Stream, emit event
-        0
+        sender.require_auth();
+
+        let stream_id: u64 = env.storage().instance().get(&DataKey::NextStreamId).unwrap_or(1);
+        
+        let stream = Stream {
+            stream_id,
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            withdrawn_amount: 0,
+            status: StreamStatus::Active,
+        };
+
+        let key = DataKey::Stream(stream_id);
+        env.storage().persistent().set(&key, &stream);
+        env.storage().persistent().extend_ttl(&key, 17280, 120960);
+        
+        env.storage().instance().set(&DataKey::NextStreamId, &(stream_id + 1));
+        
+        stream_id
     }
 
     /// Pause an active stream (callable by sender/admin).
@@ -79,22 +119,38 @@ impl FluxoraStream {
     }
 
     /// Return current stream state for a given stream_id.
-    pub fn get_stream_state(env: Env, _stream_id: u64) -> Stream {
-        // Placeholder until storage is implemented (use contract address as dummy)
-        let placeholder = env.current_contract_address();
-        Stream {
-            stream_id: 0,
-            sender: placeholder.clone(),
-            recipient: placeholder,
-            deposit_amount: 0,
-            rate_per_second: 0,
-            start_time: 0,
-            cliff_time: 0,
-            end_time: 0,
-            withdrawn_amount: 0,
-            status: StreamStatus::Active,
-        }
+    pub fn get_stream_state(env: Env, stream_id: u64) -> Stream {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Stream(stream_id))
+            .expect("Stream not found")
     }
 }
 
-// Add tests with `soroban-sdk = { version = "20.0.0", features = ["testutils"] }` when needed.
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn test_storage_logic() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraStream);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        client.init(&token, &admin);
+
+        env.mock_all_auths();
+        let id = client.create_stream(&sender, &recipient, &1000, &1, &100, &110, &200);
+        assert_eq!(id, 1);
+
+        let stream = client.get_stream_state(&1);
+        assert_eq!(stream.sender, sender);
+        assert_eq!(stream.deposit_amount, 1000);
+    }
+}
