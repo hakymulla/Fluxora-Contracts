@@ -202,11 +202,8 @@ impl FluxoraStream {
     /// - If the stream is not in `Active` state.
     pub fn pause_stream(env: Env, stream_id: u64) {
         let mut stream = load_stream(&env, stream_id);
-<<<<<<< HEAD
-=======
 
         // Corrected Auth Check
->>>>>>> de0d5e9 (chore: fix for CI/CD pipeline warning)
         Self::require_sender_or_admin(&env, &stream.sender);
 
         assert!(
