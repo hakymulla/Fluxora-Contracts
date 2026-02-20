@@ -18,6 +18,7 @@ struct TestContext {
     env: Env,
     contract_id: Address,
     token_id: Address,
+    #[allow(dead_code)]
     admin: Address,
     sender: Address,
     recipient: Address,
@@ -441,7 +442,7 @@ fn test_admin_can_resume_stream() {
     let stream_id = ctx.create_default_stream();
 
     ctx.client().pause_stream(&stream_id);
-    
+
     // Auth override test for resume
     ctx.client().resume_stream(&stream_id);
     let state = ctx.client().get_stream_state(&stream_id);
@@ -550,7 +551,7 @@ fn test_withdraw_after_cancel_gets_accrued_amount() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.env.ledger().set_timestamp(400); 
+    ctx.env.ledger().set_timestamp(400);
     ctx.client().cancel_stream(&stream_id);
 
     let withdrawn = ctx.client().withdraw(&stream_id);
@@ -565,7 +566,7 @@ fn test_withdraw_twice_after_cancel_panics() {
     ctx.env.ledger().set_timestamp(400);
     ctx.client().cancel_stream(&stream_id);
     ctx.client().withdraw(&stream_id);
-    ctx.client().withdraw(&stream_id); 
+    ctx.client().withdraw(&stream_id);
 }
 
 #[test]
@@ -636,12 +637,20 @@ fn test_withdraw_after_resume_succeeds() {
 fn test_multiple_streams_independent() {
     let ctx = TestContext::setup();
     let id0 = ctx.create_default_stream();
-    let id1 = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &200, &2, &0, &0, &100);
-    
+    let id1 = ctx
+        .client()
+        .create_stream(&ctx.sender, &ctx.recipient, &200, &2, &0, &0, &100);
+
     assert_eq!(id0, 0);
     assert_eq!(id1, 1);
 
     ctx.client().cancel_stream(&id0);
-    assert_eq!(ctx.client().get_stream_state(&id0).status, StreamStatus::Cancelled);
-    assert_eq!(ctx.client().get_stream_state(&id1).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client().get_stream_state(&id0).status,
+        StreamStatus::Cancelled
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id1).status,
+        StreamStatus::Active
+    );
 }
