@@ -2,6 +2,7 @@
 extern crate std;
 
 use soroban_sdk::{
+    log,
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
@@ -568,6 +569,99 @@ fn test_withdraw_twice_after_cancel_panics() {
     ctx.client().withdraw(&stream_id);
     ctx.client().withdraw(&stream_id);
 }
+
+/// Status is Complete when Recipient fully withdraws
+#[test]
+fn test_withdraw_completed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000); // 400 accrued, 600 unstreamed
+    ctx.client().cancel_stream(&stream_id);
+
+    let recipient_balance_before = ctx.token().balance(&ctx.recipient);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    assert_eq!(
+        withdrawn, 1000,
+        "recipient should withdraw the 1000 accrued tokens"
+    );
+    let recipient_balance_after = ctx.token().balance(&ctx.recipient);
+    assert_eq!(recipient_balance_after - recipient_balance_before, 1000);
+
+    // Nothing left in contract
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 0);
+
+    // Complete withdrawal record
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 1000);
+    assert_eq!(state.deposit_amount, 1000);
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
+/// Status is Complete when Recipient fully withdraws in batches
+#[test]
+fn test_withdraw_completed_in_batch() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(200); // 200 accrued, 800 unstreamed
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    assert_eq!(
+        withdrawn, 200,
+        "recipient should withdraw the 200 accrued tokens"
+    );
+
+    ctx.env.ledger().set_timestamp(500); // 500 accrued, 500 unstreamed
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    assert_eq!(
+        withdrawn, 300,
+        "recipient should withdraw the 500 accrued tokens"
+    );
+
+    ctx.env.ledger().set_timestamp(1000); // 1000 accrued, 0 unstreamed
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    assert_eq!(
+        withdrawn, 500,
+        "recipient should withdraw the 500 accrued tokens"
+    );
+
+    // Nothing left in contract
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 0);
+
+    // Complete withdrawal record
+    let state = ctx.client().get_stream_state(&stream_id);
+    log!(&ctx.env, "state:", state);
+    assert_eq!(state.withdrawn_amount, 1000);
+    assert_eq!(state.deposit_amount, 1000);
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
+#[test]
+#[should_panic(expected = "stream already completed")]
+fn test_withdraw_completed_panic() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000); // 400 accrued, 600 unstreamed
+    ctx.client().cancel_stream(&stream_id);
+
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    assert_eq!(
+        withdrawn, 1000,
+        "recipient should withdraw the 1000 accrued tokens"
+    );
+
+    let _ = ctx.client().withdraw(&stream_id);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — withdraw (general)
+// ---------------------------------------------------------------------------
 
 #[test]
 fn test_withdraw_mid_stream() {
