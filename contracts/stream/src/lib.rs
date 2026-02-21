@@ -365,27 +365,44 @@ impl FluxoraStream {
     }
 
     /// Internal helper to check authorization for sender or admin.
-    fn require_sender_or_admin(env: &Env, sender: &Address) {
-        let admin = get_admin(env);
-
-        // This allows the admin to bypass the sender's auth requirement.
-        if sender != &admin {
-            // If the sender is NOT the admin, the admin can still authorize this call.
-            // We check the admin first; if they didn't sign, we require the sender.
-
-            admin.require_auth();
-        } else {
-            sender.require_auth();
-        }
+    fn require_sender_or_admin(_env: &Env, sender: &Address) {
+        // Only the sender can manage their own stream via these paths.
+        // Admin overrides are handled by the 'as_admin' specific functions.
+        sender.require_auth();
     }
 }
 
 #[contractimpl]
 impl FluxoraStream {
-    /// Cancel a stream as the contract admin. Identical logic to cancel_stream.
     pub fn cancel_stream_as_admin(env: Env, stream_id: u64) {
         get_admin(&env).require_auth();
         Self::cancel_stream(env, stream_id);
+    }
+
+    pub fn pause_stream_as_admin(env: Env, stream_id: u64) {
+        get_admin(&env).require_auth();
+        let mut stream = load_stream(&env, stream_id);
+        assert!(
+            stream.status == StreamStatus::Active,
+            "stream is not active"
+        );
+        stream.status = StreamStatus::Paused;
+        save_stream(&env, &stream);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("paused"), stream_id), ());
+    }
+
+    pub fn resume_stream_as_admin(env: Env, stream_id: u64) {
+        get_admin(&env).require_auth();
+        let mut stream = load_stream(&env, stream_id);
+        assert!(
+            stream.status == StreamStatus::Paused,
+            "stream is not paused"
+        );
+        stream.status = StreamStatus::Active;
+        save_stream(&env, &stream);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("resumed"), stream_id), ());
     }
 }
 

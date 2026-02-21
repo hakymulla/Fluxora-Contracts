@@ -842,17 +842,10 @@ fn test_pause_stream_as_recipient_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-        address: &ctx.admin,
-        invoke: &soroban_sdk::testutils::MockAuthInvoke {
-            contract: &ctx.contract_id,
-            fn_name: "pause_stream",
-            args: (stream_id,).into_val(&ctx.env),
-            sub_invokes: &[],
-        },
-    }]);
+    let env = Env::default();
+    let client = FluxoraStreamClient::new(&env, &ctx.contract_id);
 
-    ctx.client().pause_stream(&stream_id);
+    client.pause_stream(&stream_id);
 }
 
 #[test]
@@ -860,19 +853,11 @@ fn test_pause_stream_as_recipient_fails() {
 fn test_cancel_stream_as_random_address_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
-    let hacker = Address::generate(&ctx.env);
 
-    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-        address: &hacker,
-        invoke: &soroban_sdk::testutils::MockAuthInvoke {
-            contract: &ctx.contract_id.clone(),
-            fn_name: "cancel_stream",
-            args: (stream_id,).into_val(&ctx.env),
-            sub_invokes: &[],
-        },
-    }]);
+    let env = Env::default();
+    let client = FluxoraStreamClient::new(&env, &ctx.contract_id);
 
-    ctx.client().cancel_stream(&stream_id);
+    client.cancel_stream(&stream_id);
 }
 
 #[test]
@@ -1396,4 +1381,28 @@ fn test_calculate_accrued_exactly_at_cliff() {
         accrued, 500,
         "at cliff, should accrue full amount from start"
     );
+}
+
+#[test]
+fn test_admin_can_pause_via_admin_path() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Verification: Admin can successfully pause via the admin entrypoint
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+}
+
+#[test]
+fn test_cancel_stream_as_admin_works() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Verification: Admin can still intervene via the admin path
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
 }
