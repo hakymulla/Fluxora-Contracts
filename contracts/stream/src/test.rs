@@ -5,7 +5,7 @@ use soroban_sdk::{
     log,
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, FromVal,
+    Address, Env, FromVal, Vec,
 };
 
 use crate::{FluxoraStream, FluxoraStreamClient, StreamEvent, StreamStatus};
@@ -320,6 +320,118 @@ fn test_create_stream_invalid_times_panics() {
         &1000u64,
         &500u64, // end before start
     );
+}
+
+#[test]
+fn test_create_stream_multiple() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id_1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &1000u64, // cliff equals end
+        &1000u64,
+    );
+
+    let stream_id_2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &1000u64, // cliff equals end
+        &1000u64,
+    );
+
+    let stream_id_3 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64, // cliff equals end
+        &500u64,
+    );
+
+    let stream_id_4 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &4000_i128,
+        &1_i128,
+        &0u64,
+        &0u64, // cliff equals end
+        &4000u64,
+    );
+
+    let stream_id_5 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64, // cliff equals end
+        &1000u64,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id_1);
+    assert_eq!(state.stream_id, 0);
+
+    let state = ctx.client().get_stream_state(&stream_id_2);
+    assert_eq!(state.stream_id, 1);
+
+    let state = ctx.client().get_stream_state(&stream_id_3);
+    assert_eq!(state.stream_id, 2);
+
+    let state = ctx.client().get_stream_state(&stream_id_4);
+    assert_eq!(state.stream_id, 3);
+
+    let state = ctx.client().get_stream_state(&stream_id_5);
+    assert_eq!(state.stream_id, 4);
+}
+
+#[test]
+fn test_create_stream_multiple_loop() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let mut counter = 0;
+    let mut stream_vec = Vec::new(&ctx.env);
+    loop {
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &10_i128,
+            &1_i128,
+            &0u64,
+            &0u64, // cliff equals end
+            &10u64,
+        );
+
+        counter += 1;
+
+        stream_vec.push_back(stream_id);
+
+        if counter == 100 {
+            break;
+        }
+    }
+
+    let mut counter = 0;
+    loop {
+        let state = ctx.client().get_stream_state(&counter);
+        let stream_id = stream_vec.get(counter as u32).unwrap();
+
+        assert_eq!(state.stream_id, counter);
+        assert_eq!(state.stream_id, stream_id);
+        counter += 1;
+
+        if counter == 100 {
+            break;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
