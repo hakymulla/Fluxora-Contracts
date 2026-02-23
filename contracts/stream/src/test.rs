@@ -3488,3 +3488,221 @@ fn test_withdraw_after_cancel_then_completed() {
     // because accrued (600) - withdrawn (600) = 0
     ctx.client().withdraw(&stream_id);
 }
+
+// ---------------------------------------------------------------------------
+// Tests — stream_id generation and uniqueness
+// ---------------------------------------------------------------------------
+
+/// The first stream created after init must receive stream_id = 0.
+#[test]
+fn test_stream_id_first_stream_is_zero() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    assert_eq!(id, 0, "first stream_id must be 0");
+    assert_eq!(
+        ctx.client().get_stream_state(&id).stream_id,
+        0,
+        "stream struct must also record stream_id = 0"
+    );
+}
+
+/// Each subsequent call to create_stream increments the stream_id by exactly one,
+/// producing a monotonically increasing sequence with no gaps.
+#[test]
+fn test_stream_id_increments_by_one() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let id0 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+    );
+    let id1 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+    );
+    let id2 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+    );
+
+    assert_eq!(id0, 0, "first id must be 0");
+    assert_eq!(id1, id0 + 1, "second id must be first + 1");
+    assert_eq!(id2, id1 + 1, "third id must be second + 1");
+}
+
+/// The stream_id returned by create_stream must equal the stream_id field
+/// stored inside the persisted Stream struct for every stream created.
+#[test]
+fn test_create_stream_returned_id_matches_stored_id() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    for expected_id in 0u64..5 {
+        let returned_id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &100_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+        let stored = ctx.client().get_stream_state(&returned_id);
+
+        assert_eq!(
+            returned_id, expected_id,
+            "stream {expected_id}: returned id must be sequential"
+        );
+        assert_eq!(
+            stored.stream_id, returned_id,
+            "stream {expected_id}: stored stream_id must equal returned id"
+        );
+    }
+}
+
+/// N streams must produce N distinct IDs with no duplicates and no gaps,
+/// forming the sequence 0, 1, 2, …, N-1.
+#[test]
+fn test_stream_ids_are_unique_no_gaps() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    const N: u64 = 20;
+    let mut ids = Vec::new(&ctx.env);
+
+    for expected in 0..N {
+        let id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &10_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &10u64,
+        );
+        assert_eq!(id, expected, "stream {expected} must have id {expected}");
+        ids.push_back(id);
+    }
+
+    // Pairwise uniqueness check — no two entries may share an id
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            assert_ne!(
+                ids.get(i).unwrap(),
+                ids.get(j).unwrap(),
+                "stream_ids at positions {i} and {j} must be different"
+            );
+        }
+    }
+}
+
+/// A create_stream call that fails validation (deposit too low) must NOT
+/// advance the NextStreamId counter; the next successful call must receive
+/// the id that the failed call would have consumed.
+#[test]
+fn test_failed_create_stream_does_not_advance_counter() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // First successful stream → id = 0
+    let id0 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+    );
+    assert_eq!(id0, 0);
+
+    // Attempt a stream with an underfunded deposit (1 token, need 100) → must panic
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1_i128, // deposit < rate * duration (100)
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+    }));
+    assert!(result.is_err(), "underfunded create_stream must panic");
+
+    // Next successful stream must still be id = 1, not 2
+    let id1 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+    );
+    assert_eq!(
+        id1, 1,
+        "counter must not advance after a failed create_stream"
+    );
+}
+
+/// Streams created by different senders and recipients all draw from the
+/// same global NextStreamId counter, producing globally unique ids.
+#[test]
+fn test_stream_ids_unique_across_different_senders() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Provision a second sender with enough tokens
+    let sender2 = Address::generate(&ctx.env);
+    let recipient2 = Address::generate(&ctx.env);
+    ctx.sac.mint(&sender2, &1_000_i128);
+
+    let id_a = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+    );
+    let id_b = ctx.client().create_stream(
+        &sender2, &recipient2, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+    );
+    let id_c = ctx.client().create_stream(
+        &ctx.sender, &recipient2, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+    );
+
+    assert_eq!(id_a, 0, "first stream (sender1→recipient1) must be 0");
+    assert_eq!(id_b, 1, "second stream (sender2→recipient2) must be 1");
+    assert_eq!(id_c, 2, "third stream (sender1→recipient2) must be 2");
+
+    assert_ne!(id_a, id_b, "ids from different senders must not collide");
+    assert_ne!(id_b, id_c, "ids from different senders must not collide");
+    assert_ne!(id_a, id_c, "ids from different senders must not collide");
+}
+
+/// Pausing, resuming, or cancelling a stream must not alter any stream's
+/// stream_id field, and the global counter must continue from where it left off.
+#[test]
+fn test_stream_id_stability_after_state_changes() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let id0 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &200_i128, &2_i128, &0u64, &0u64, &100u64,
+    );
+    let id1 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &200_i128, &2_i128, &0u64, &0u64, &100u64,
+    );
+    let id2 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &200_i128, &2_i128, &0u64, &0u64, &100u64,
+    );
+
+    // Mutate stream 1: pause then cancel
+    ctx.client().pause_stream(&id1);
+    ctx.client().cancel_stream(&id1);
+
+    // Stream struct stream_id fields must be unchanged
+    assert_eq!(ctx.client().get_stream_state(&id0).stream_id, id0);
+    assert_eq!(ctx.client().get_stream_state(&id1).stream_id, id1);
+    assert_eq!(ctx.client().get_stream_state(&id2).stream_id, id2);
+
+    // The global counter must continue from 3
+    let id3 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &200_i128, &2_i128, &0u64, &0u64, &100u64,
+    );
+    assert_eq!(id3, 3, "counter must continue monotonically after state mutations");
+}
