@@ -429,30 +429,44 @@ impl FluxoraStream {
         );
     }
 
+    /// Pause a stream as the contract admin. Identical logic to `pause_stream` but
+    /// authorises via the admin address instead of the sender.
     pub fn pause_stream_as_admin(env: Env, stream_id: u64) {
-        get_admin(&env).require_auth();
+        let admin = get_admin(&env);
+        admin.require_auth();
+
         let mut stream = load_stream(&env, stream_id);
+
         assert!(
             stream.status == StreamStatus::Active,
             "stream is not active"
         );
+
         stream.status = StreamStatus::Paused;
         save_stream(&env, &stream);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("paused"), stream_id), ());
+
+        env.events().publish(
+            (symbol_short!("paused"), stream_id),
+            StreamEvent::Paused(stream_id),
+        );
     }
 
     pub fn resume_stream_as_admin(env: Env, stream_id: u64) {
         get_admin(&env).require_auth();
         let mut stream = load_stream(&env, stream_id);
+
         assert!(
             stream.status == StreamStatus::Paused,
             "stream is not paused"
         );
+
         stream.status = StreamStatus::Active;
         save_stream(&env, &stream);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("resumed"), stream_id), ());
+
+        env.events().publish(
+            (symbol_short!("resumed"), stream_id),
+            StreamEvent::Resumed(stream_id),
+        );
     }
 }
 

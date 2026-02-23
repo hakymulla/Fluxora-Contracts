@@ -1466,7 +1466,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'stream must be active or paused to cancel' from contract function 'Symbol(obj#441)'"
+                  "string": "caught panic 'stream must be active or paused to cancel' from contract function 'Symbol(obj#439)'"
                 },
                 {
                   "u64": 0
