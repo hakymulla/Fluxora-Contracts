@@ -2044,3 +2044,418 @@ fn test_get_stream_state_non_existence_stream() {
     ctx.env.ledger().set_timestamp(0);
     let _ = ctx.client().get_stream_state(&1);
 }
+
+// ---------------------------------------------------------------------------
+// Tests — Issue: withdraw zero and excess handling
+// ---------------------------------------------------------------------------
+
+/// Test withdraw when accrued - withdrawn = 0 before cliff
+/// Should panic with "nothing to withdraw"
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_zero_before_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff at t=500
+
+    // Before cliff, accrued = 0, withdrawn = 0, so withdrawable = 0
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&stream_id);
+}
+
+/// Test withdraw when accrued - withdrawn = 0 after full withdrawal
+/// Should panic with "stream already completed"
+#[test]
+#[should_panic(expected = "stream already completed")]
+fn test_withdraw_zero_after_full_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw everything at t=1000
+    ctx.env.ledger().set_timestamp(1000);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+
+    // Try to withdraw again - should panic with "stream already completed"
+    ctx.client().withdraw(&stream_id);
+}
+
+/// Test withdraw when accrued - withdrawn = 0 at start time (no cliff)
+/// Should panic with "nothing to withdraw"
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_zero_at_start_time() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // At start time, accrued = 0, withdrawn = 0, so withdrawable = 0
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().withdraw(&stream_id);
+}
+
+/// Test withdraw immediately after previous withdrawal with no time elapsed
+/// Should panic with "nothing to withdraw"
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_zero_no_time_elapsed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw at t=500
+    ctx.env.ledger().set_timestamp(500);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 500);
+
+    // Try to withdraw again at same timestamp - should panic
+    ctx.client().withdraw(&stream_id);
+}
+
+/// Test withdraw when cancelled with zero accrued
+/// Should panic with "nothing to withdraw"
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_zero_after_immediate_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel immediately at t=0 (no accrual)
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Try to withdraw - should panic because accrued = 0
+    ctx.client().withdraw(&stream_id);
+}
+
+/// Test that contract correctly calculates withdrawable amount
+/// and doesn't allow withdrawing more than accrued
+#[test]
+fn test_withdraw_capped_at_accrued_amount() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // At t=300, accrued = 300
+    ctx.env.ledger().set_timestamp(300);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    // Should withdraw exactly 300, not more
+    assert_eq!(withdrawn, 300);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 300);
+
+    // Verify recipient balance increased by exactly 300
+    assert_eq!(ctx.token().balance(&ctx.recipient), 300);
+}
+
+/// Test that withdrawable amount is always non-negative
+/// by verifying withdrawn_amount never exceeds deposit_amount
+#[test]
+fn test_withdraw_no_negative_withdrawable() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw multiple times
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+
+    // Verify withdrawn_amount never exceeds deposit_amount
+    assert!(state.withdrawn_amount <= state.deposit_amount);
+    assert_eq!(state.withdrawn_amount, 1000);
+    assert_eq!(state.deposit_amount, 1000);
+}
+
+/// Test withdraw with maximum values doesn't overflow
+#[test]
+fn test_withdraw_no_overflow_max_values() {
+    let ctx = TestContext::setup();
+    ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000_i128));
+    let stream_id = ctx.create_max_rate_stream();
+
+    // Advance to end of stream
+    ctx.env.ledger().set_timestamp(3);
+
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    // Verify withdrawal is valid and non-negative
+    assert!(withdrawn > 0);
+    assert!(withdrawn <= i128::MAX - 1);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert!(state.withdrawn_amount <= state.deposit_amount);
+    assert_eq!(state.withdrawn_amount, withdrawn);
+}
+
+/// Test that accrued amount is properly capped at deposit_amount
+/// preventing any possibility of withdrawing more than deposited
+#[test]
+fn test_withdraw_accrued_capped_at_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Go way past end time
+    ctx.env.ledger().set_timestamp(10_000);
+
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    // Should withdraw exactly deposit_amount, not more
+    assert_eq!(withdrawn, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 1000);
+    assert_eq!(state.deposit_amount, 1000);
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
+/// Test withdraw after cancel with partial accrual
+/// Verifies correct calculation of withdrawable amount
+#[test]
+fn test_withdraw_after_cancel_partial_accrual() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel at t=250 (250 tokens accrued)
+    ctx.env.ledger().set_timestamp(250);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Withdraw the accrued amount
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 250);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 250);
+    // After cancel, status remains Cancelled even after full withdrawal
+    // because the stream was terminated early, not completed naturally
+    assert_eq!(state.status, StreamStatus::Cancelled);
+}
+
+/// Test that multiple partial withdrawals sum correctly
+/// and final withdrawal completes the stream
+#[test]
+fn test_withdraw_multiple_partial_no_excess() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // First withdrawal at t=100
+    ctx.env.ledger().set_timestamp(100);
+    let w1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w1, 100);
+
+    // Second withdrawal at t=300
+    ctx.env.ledger().set_timestamp(300);
+    let w2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w2, 200);
+
+    // Third withdrawal at t=700
+    ctx.env.ledger().set_timestamp(700);
+    let w3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w3, 400);
+
+    // Final withdrawal at t=1000
+    ctx.env.ledger().set_timestamp(1000);
+    let w4 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w4, 300);
+
+    // Verify total withdrawn equals deposit
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 1000);
+    assert_eq!(w1 + w2 + w3 + w4, 1000);
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
+/// Test withdraw with cliff - before cliff returns zero withdrawable
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_zero_one_second_before_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff at t=500
+
+    // One second before cliff
+    ctx.env.ledger().set_timestamp(499);
+    ctx.client().withdraw(&stream_id);
+}
+
+/// Test withdraw exactly at cliff time
+#[test]
+fn test_withdraw_exactly_at_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff at t=500
+
+    // Exactly at cliff, should be able to withdraw accrued amount
+    ctx.env.ledger().set_timestamp(500);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    // At cliff (t=500), accrued from start (t=0) = 500 tokens
+    assert_eq!(withdrawn, 500);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 500);
+}
+
+/// Test that contract balance decreases correctly with withdrawals
+#[test]
+fn test_withdraw_contract_balance_tracking() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let initial_contract_balance = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(initial_contract_balance, 1000);
+
+    // Withdraw 400 at t=400
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().withdraw(&stream_id);
+
+    let contract_balance_after_first = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(contract_balance_after_first, 600);
+
+    // Withdraw remaining 600 at t=1000
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let final_contract_balance = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(final_contract_balance, 0);
+}
+
+/// Test withdraw with deposit greater than total streamable
+/// Ensures only streamable amount can be withdrawn
+#[test]
+fn test_withdraw_excess_deposit_only_streams_calculated_amount() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream with deposit > rate * duration
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128, // deposit 2000
+        &1_i128,    // rate 1/s
+        &0u64,
+        &0u64,
+        &1000u64, // duration 1000s, so only 1000 will stream
+    );
+
+    // At end, only 1000 should be withdrawable (rate * duration)
+    ctx.env.ledger().set_timestamp(1000);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    // Should withdraw exactly 1000 (rate * duration), not 2000 (deposit)
+    assert_eq!(withdrawn, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 1000);
+    assert_eq!(state.deposit_amount, 2000);
+}
+
+/// Test that withdrawn_amount is monotonically increasing
+#[test]
+fn test_withdraw_monotonic_increase() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let mut previous_withdrawn = 0_i128;
+
+    for t in [100, 200, 400, 700, 1000] {
+        ctx.env.ledger().set_timestamp(t);
+        ctx.client().withdraw(&stream_id);
+
+        let state = ctx.client().get_stream_state(&stream_id);
+
+        // Verify withdrawn_amount only increases
+        assert!(state.withdrawn_amount > previous_withdrawn);
+        previous_withdrawn = state.withdrawn_amount;
+    }
+}
+
+/// Test edge case: stream with very small rate
+#[test]
+fn test_withdraw_small_rate_no_underflow() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Small rate: 1 token per 10 seconds
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,  // deposit 100 tokens
+        &1_i128,    // rate 1 token/second
+        &0u64,
+        &0u64,
+        &100u64,    // 100 seconds for 100 tokens total
+    );
+
+    // At t=50, accrued should be 50 tokens
+    ctx.env.ledger().set_timestamp(50);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 50);
+
+    // Withdraw at t=50
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 50);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 50);
+}
+
+/// Test that status transitions correctly on final withdrawal
+#[test]
+fn test_withdraw_status_transition_to_completed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Partial withdrawal
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+
+    // Final withdrawal
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
+/// Test withdraw after cancel and then try to withdraw again
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_after_cancel_then_completed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel at t=600
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Withdraw accrued amount (600 tokens)
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 600);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    // After withdrawing all accrued from a cancelled stream, 
+    // withdrawn_amount equals the accrued amount at cancellation
+    assert_eq!(state.withdrawn_amount, 600);
+    // Status remains Cancelled (not Completed) because stream was terminated early
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Try to withdraw again - should panic with "nothing to withdraw"
+    // because accrued (600) - withdrawn (600) = 0
+    ctx.client().withdraw(&stream_id);
+}
