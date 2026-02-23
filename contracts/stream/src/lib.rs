@@ -251,15 +251,19 @@ impl FluxoraStream {
 
     /// Resume a paused stream. Only the sender or admin may call this.
     /// # Panics
-    /// - If the stream is not in `Paused` state.
+    /// - If the stream is `Active` (not paused).
+    /// - If the stream is `Completed` (terminal state).
+    /// - If the stream is `Cancelled` (terminal state).
     pub fn resume_stream(env: Env, stream_id: u64) {
         let mut stream = load_stream(&env, stream_id);
         Self::require_sender_or_admin(&env, &stream.sender);
 
-        assert!(
-            stream.status == StreamStatus::Paused,
-            "stream is not paused"
-        );
+        match stream.status {
+            StreamStatus::Active => panic!("stream is active, not paused"),
+            StreamStatus::Completed => panic!("stream is completed"),
+            StreamStatus::Cancelled => panic!("stream is cancelled"),
+            StreamStatus::Paused => {}
+        }
 
         stream.status = StreamStatus::Active;
         save_stream(&env, &stream);

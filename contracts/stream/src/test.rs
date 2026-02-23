@@ -769,11 +769,34 @@ fn test_pause_already_paused_panics() {
 }
 
 #[test]
-#[should_panic(expected = "stream is not paused")]
+#[should_panic(expected = "stream is active, not paused")]
 fn test_resume_active_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
-    ctx.client().resume_stream(&stream_id); // not paused, should panic
+    ctx.client().resume_stream(&stream_id);
+}
+
+#[test]
+#[should_panic(expected = "stream is completed")]
+fn test_resume_completed_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    ctx.client().resume_stream(&stream_id);
+}
+
+#[test]
+#[should_panic(expected = "stream is cancelled")]
+fn test_resume_cancelled_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.client().cancel_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    ctx.client().resume_stream(&stream_id);
 }
 
 // ---------------------------------------------------------------------------
