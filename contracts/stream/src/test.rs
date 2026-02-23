@@ -796,6 +796,24 @@ fn test_calculate_accrued_at_start() {
 }
 
 #[test]
+fn test_calculate_accrued_before_cliff() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &500u64,
+        &1000u64,
+    );
+    ctx.env.ledger().set_timestamp(300);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 0);
+}
+
+#[test]
 fn test_calculate_accrued_mid_stream() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
