@@ -494,6 +494,43 @@ fn test_create_stream_initial_state() {
     assert_eq!(ctx.token().balance(&ctx.sender), 9000);
 }
 
+/// Create a stream, perform partial withdraws then a final withdraw, and
+/// assert `withdrawn_amount` increments and status transitions to Completed.
+#[test]
+fn test_withdraw_partial_then_full_updates_state() {
+    let ctx = TestContext::setup();
+
+    // Create a standard stream: deposit=1000, rate=1/s, duration=1000s
+    let stream_id = ctx.create_default_stream();
+
+    // Advance to t=300 and withdraw -> should get 300
+    ctx.env.ledger().set_timestamp(300);
+    let amt1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amt1, 300, "first withdraw should return 300");
+
+    let state1 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state1.withdrawn_amount, 300);
+    assert_eq!(state1.status, StreamStatus::Active);
+
+    // Advance to t=800 and withdraw -> should get 500 (800 - 300)
+    ctx.env.ledger().set_timestamp(800);
+    let amt2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amt2, 500, "second withdraw should return 500");
+
+    let state2 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state2.withdrawn_amount, 800);
+    assert_eq!(state2.status, StreamStatus::Active);
+
+    // Advance to t=1000 and withdraw -> should get final 200 and mark Completed
+    ctx.env.ledger().set_timestamp(1000);
+    let amt3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amt3, 200, "final withdraw should return remaining 200");
+
+    let state3 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state3.withdrawn_amount, 1000);
+    assert_eq!(state3.status, StreamStatus::Completed);
+}
+
 #[test]
 #[should_panic(expected = "deposit_amount must be positive")]
 fn test_create_stream_zero_deposit_panics() {
@@ -4876,8 +4913,15 @@ fn test_withdraw_updates_withdrawn_amount_and_status() {
 
     // INITIAL STATE: Stream created, nothing withdrawn
     let initial_state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(initial_state.withdrawn_amount, 0, "initial withdrawn_amount should be 0");
-    assert_eq!(initial_state.status, StreamStatus::Active, "initial status should be Active");
+    assert_eq!(
+        initial_state.withdrawn_amount, 0,
+        "initial withdrawn_amount should be 0"
+    );
+    assert_eq!(
+        initial_state.status,
+        StreamStatus::Active,
+        "initial status should be Active"
+    );
     assert_eq!(
         initial_state.deposit_amount, 1000,
         "deposit_amount should be 1000"
@@ -4900,7 +4944,8 @@ fn test_withdraw_updates_withdrawn_amount_and_status() {
         "withdrawn_amount should be 300 after first withdrawal"
     );
     assert_eq!(
-        state_after_first.status, StreamStatus::Active,
+        state_after_first.status,
+        StreamStatus::Active,
         "status should still be Active (not complete)"
     );
 
@@ -4929,7 +4974,8 @@ fn test_withdraw_updates_withdrawn_amount_and_status() {
         "withdrawn_amount should be 700 after second withdrawal (300 + 400)"
     );
     assert_eq!(
-        state_after_second.status, StreamStatus::Active,
+        state_after_second.status,
+        StreamStatus::Active,
         "status should still be Active (not complete)"
     );
 
@@ -4958,7 +5004,8 @@ fn test_withdraw_updates_withdrawn_amount_and_status() {
         "withdrawn_amount should equal deposit_amount (1000)"
     );
     assert_eq!(
-        state_after_final.status, StreamStatus::Completed,
+        state_after_final.status,
+        StreamStatus::Completed,
         "status should be Completed when fully withdrawn"
     );
 
@@ -4977,7 +5024,8 @@ fn test_withdraw_updates_withdrawn_amount_and_status() {
         "recipient should have received all 1000 tokens total"
     );
     assert_eq!(
-        ctx.token().balance(&ctx.contract_id), 0,
+        ctx.token().balance(&ctx.contract_id),
+        0,
         "contract should have no tokens left"
     );
     assert_eq!(
@@ -5000,8 +5048,15 @@ fn test_withdraw_partial_then_full_with_intermediate_checks() {
     assert_eq!(w1, 250);
 
     let state1 = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state1.withdrawn_amount, 250, "after first: withdrawn_amount = 250");
-    assert_eq!(state1.status, StreamStatus::Active, "after first: still Active");
+    assert_eq!(
+        state1.withdrawn_amount, 250,
+        "after first: withdrawn_amount = 250"
+    );
+    assert_eq!(
+        state1.status,
+        StreamStatus::Active,
+        "after first: still Active"
+    );
     assert_eq!(state1.deposit_amount, 1000, "deposit_amount unchanged");
 
     // Second partial withdrawal: 250 more tokens at t=500
@@ -5014,7 +5069,11 @@ fn test_withdraw_partial_then_full_with_intermediate_checks() {
         state2.withdrawn_amount, 500,
         "after second: withdrawn_amount = 500"
     );
-    assert_eq!(state2.status, StreamStatus::Active, "after second: still Active");
+    assert_eq!(
+        state2.status,
+        StreamStatus::Active,
+        "after second: still Active"
+    );
 
     // Third partial withdrawal: 250 more tokens at t=750
     ctx.env.ledger().set_timestamp(750);
@@ -5026,7 +5085,11 @@ fn test_withdraw_partial_then_full_with_intermediate_checks() {
         state3.withdrawn_amount, 750,
         "after third: withdrawn_amount = 750"
     );
-    assert_eq!(state3.status, StreamStatus::Active, "after third: still Active");
+    assert_eq!(
+        state3.status,
+        StreamStatus::Active,
+        "after third: still Active"
+    );
 
     // Final withdrawal: last 250 tokens at t=1000 -> COMPLETED
     ctx.env.ledger().set_timestamp(1000);
@@ -5039,7 +5102,8 @@ fn test_withdraw_partial_then_full_with_intermediate_checks() {
         "final: withdrawn_amount = 1000 (full deposit)"
     );
     assert_eq!(
-        state_final.status, StreamStatus::Completed,
+        state_final.status,
+        StreamStatus::Completed,
         "final: status = Completed"
     );
 
@@ -5100,8 +5164,7 @@ fn test_withdraw_status_transitions_correctly() {
         assert_eq!(
             state.status, expected_status,
             "at t={}, status should be {:?}",
-            timestamp,
-            expected_status
+            timestamp, expected_status
         );
     }
 }
@@ -5378,15 +5441,22 @@ fn test_withdraw_many_small_increments() {
         assert_eq!(
             state.withdrawn_amount, total_withdrawn,
             "at iteration {}, withdrawn_amount should be {}",
-            i,
-            total_withdrawn
+            i, total_withdrawn
         );
 
         if i == 10 {
             // Last withdrawal should mark as Completed
-            assert_eq!(state.status, StreamStatus::Completed, "final should be Completed");
+            assert_eq!(
+                state.status,
+                StreamStatus::Completed,
+                "final should be Completed"
+            );
         } else {
-            assert_eq!(state.status, StreamStatus::Active, "intermediate should be Active");
+            assert_eq!(
+                state.status,
+                StreamStatus::Active,
+                "intermediate should be Active"
+            );
         }
     }
 
@@ -5401,28 +5471,40 @@ fn test_withdraw_contract_balance_decreases() {
     let stream_id = ctx.create_default_stream();
 
     let initial_contract_balance = ctx.token().balance(&ctx.contract_id);
-    assert_eq!(initial_contract_balance, 1000, "initial contract balance = deposit");
+    assert_eq!(
+        initial_contract_balance, 1000,
+        "initial contract balance = deposit"
+    );
 
     // First withdrawal: 300 tokens
     ctx.env.ledger().set_timestamp(300);
     ctx.client().withdraw(&stream_id);
 
     let balance_after_1 = ctx.token().balance(&ctx.contract_id);
-    assert_eq!(balance_after_1, 700, "contract balance should decrease by 300");
+    assert_eq!(
+        balance_after_1, 700,
+        "contract balance should decrease by 300"
+    );
 
     // Second withdrawal: 400 tokens
     ctx.env.ledger().set_timestamp(700);
     ctx.client().withdraw(&stream_id);
 
     let balance_after_2 = ctx.token().balance(&ctx.contract_id);
-    assert_eq!(balance_after_2, 300, "contract balance should decrease by 400 more");
+    assert_eq!(
+        balance_after_2, 300,
+        "contract balance should decrease by 400 more"
+    );
 
     // Final withdrawal: 300 tokens
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().withdraw(&stream_id);
 
     let final_contract_balance = ctx.token().balance(&ctx.contract_id);
-    assert_eq!(final_contract_balance, 0, "contract balance should be 0 after full withdrawal");
+    assert_eq!(
+        final_contract_balance, 0,
+        "contract balance should be 0 after full withdrawal"
+    );
 }
 
 /// Test: Verify recipient token balance increases with each withdrawal
@@ -5433,7 +5515,10 @@ fn test_withdraw_recipient_balance_increases() {
     let stream_id = ctx.create_default_stream();
 
     let initial_recipient_balance = ctx.token().balance(&ctx.recipient);
-    assert_eq!(initial_recipient_balance, 0, "recipient starts with 0 tokens");
+    assert_eq!(
+        initial_recipient_balance, 0,
+        "recipient starts with 0 tokens"
+    );
 
     // First withdrawal: 300 tokens
     ctx.env.ledger().set_timestamp(300);
@@ -5457,7 +5542,10 @@ fn test_withdraw_recipient_balance_increases() {
     assert_eq!(amount_3, 300, "final withdrawal = 300");
 
     let final_recipient_balance = ctx.token().balance(&ctx.recipient);
-    assert_eq!(final_recipient_balance, 1000, "recipient should have all 1000 tokens");
+    assert_eq!(
+        final_recipient_balance, 1000,
+        "recipient should have all 1000 tokens"
+    );
 }
 
 /// Test: Withdrawn_amount stays consistent between calls
@@ -5488,7 +5576,10 @@ fn test_withdraw_state_persists_across_calls() {
 
     // Check that previous withdraw didn't reset
     let state_3 = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state_3.withdrawn_amount, 800, "previous withdraw stayed, new added");
+    assert_eq!(
+        state_3.withdrawn_amount, 800,
+        "previous withdraw stayed, new added"
+    );
 }
 
 /// Test: Withdrawn amount with cliff - verify only streamable amount after cliff
