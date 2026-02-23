@@ -268,6 +268,144 @@ fn test_init_with_different_addresses() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests — Issue #62: init cannot be called twice (re-initialization)
+// ---------------------------------------------------------------------------
+
+/// Re-init with the exact same token and admin must still panic.
+#[test]
+#[should_panic(expected = "already initialised")]
+fn test_reinit_same_token_same_admin_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+
+    // Second init with identical arguments must panic
+    client.init(&token_id, &admin);
+}
+
+/// Re-init with a different token but same admin must panic.
+#[test]
+#[should_panic(expected = "already initialised")]
+fn test_reinit_different_token_same_admin_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+
+    // Second init with different token but same admin must panic
+    let token_id2 = Address::generate(&env);
+    client.init(&token_id2, &admin);
+}
+
+/// Re-init with same token but a different admin must panic.
+#[test]
+#[should_panic(expected = "already initialised")]
+fn test_reinit_same_token_different_admin_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+
+    // Second init with same token but different admin must panic
+    let admin2 = Address::generate(&env);
+    client.init(&token_id, &admin2);
+}
+
+/// After a failed re-init attempt the original config must be unchanged.
+#[test]
+fn test_config_unchanged_after_failed_reinit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+
+    // Capture original config
+    let original_config = client.get_config();
+
+    // Attempt re-init with completely different params (should panic)
+    let token_id2 = Address::generate(&env);
+    let admin2 = Address::generate(&env);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.init(&token_id2, &admin2);
+    }));
+    assert!(result.is_err(), "re-init should have panicked");
+
+    // Config must be identical to the original
+    let config_after = client.get_config();
+    assert_eq!(
+        config_after.token, original_config.token,
+        "token must not change"
+    );
+    assert_eq!(
+        config_after.admin, original_config.admin,
+        "admin must not change"
+    );
+}
+
+/// Contract must remain fully operational after a failed re-init attempt.
+#[test]
+fn test_operations_work_after_failed_reinit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Deploy contract and set up a real SAC token
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+
+    // Fund the sender
+    let sac = StellarAssetClient::new(&env, &token_id);
+    sac.mint(&sender, &10_000_i128);
+
+    // Attempt re-init (should fail)
+    let admin2 = Address::generate(&env);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.init(&token_id, &admin2);
+    }));
+    assert!(result.is_err(), "re-init should have panicked");
+
+    // Contract must still accept streams
+    env.ledger().set_timestamp(0);
+    let stream_id = client.create_stream(
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
+    );
+
+    let state = client.get_stream_state(&stream_id);
+    assert_eq!(state.stream_id, 0);
+    assert_eq!(state.deposit_amount, 1000);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+// ---------------------------------------------------------------------------
 // Tests — create_stream
 // ---------------------------------------------------------------------------
 

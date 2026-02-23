@@ -99,6 +99,72 @@ fn init_twice_panics() {
     ctx.client().init(&ctx.token_id, &ctx.admin);
 }
 
+// ---------------------------------------------------------------------------
+// Tests — Issue #62: config immutability after re-init attempt
+// ---------------------------------------------------------------------------
+
+/// After a failed re-init with different params, config must still hold the
+/// original token and admin addresses.
+#[test]
+fn reinit_with_different_params_preserves_config() {
+    let ctx = TestContext::setup();
+
+    // Snapshot original config
+    let original = ctx.client().get_config();
+
+    // Attempt re-init with completely different addresses
+    let new_token = Address::generate(&ctx.env);
+    let new_admin = Address::generate(&ctx.env);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().init(&new_token, &new_admin);
+    }));
+    assert!(result.is_err(), "re-init should have panicked");
+
+    // Config must be unchanged
+    let after = ctx.client().get_config();
+    assert_eq!(
+        after.token, original.token,
+        "token must survive reinit attempt"
+    );
+    assert_eq!(
+        after.admin, original.admin,
+        "admin must survive reinit attempt"
+    );
+}
+
+/// Stream counter must remain unaffected by a failed re-init attempt.
+#[test]
+fn stream_counter_unaffected_by_reinit_attempt() {
+    let ctx = TestContext::setup();
+
+    // Create first stream (id = 0)
+    let id0 = ctx.create_default_stream();
+    assert_eq!(id0, 0);
+
+    // Attempt re-init (should fail)
+    let new_admin = Address::generate(&ctx.env);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().init(&ctx.token_id, &new_admin);
+    }));
+    assert!(result.is_err(), "re-init should have panicked");
+
+    // Create second stream — counter must still be 1
+    ctx.env.ledger().set_timestamp(0);
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    assert_eq!(
+        id1, 1,
+        "stream counter must continue from 1 after failed reinit"
+    );
+}
+
 #[test]
 fn create_stream_persists_state_and_moves_deposit() {
     let ctx = TestContext::setup();
