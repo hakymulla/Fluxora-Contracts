@@ -1163,3 +1163,219 @@ fn integration_pause_then_cancel_preserves_accrual() {
     assert_eq!(ctx.token.balance(&ctx.recipient), 1800);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
 }
+
+/// Integration test: same sender creates multiple streams to different recipients.
+///
+/// This test verifies that:
+/// 1. create_stream returns distinct stream IDs for each stream
+/// 2. Each stream maintains independent state in persistent storage
+/// 3. get_stream_state returns correct stream for each ID
+/// 4. Multiple streams can be withdrawn from independently
+/// 5. Token balances are correctly managed across multiple streams
+/// 6. Each stream lifecycle (create, withdraw, complete) is independent
+///
+/// Test flow:
+/// 1. Setup test context with sender and mint tokens
+/// 2. Create first stream: sender -> recipient1 (1000 tokens, 1 token/sec, 1000s duration)
+/// 3. Create second stream: sender -> recipient2 (2000 tokens, 2 tokens/sec, 1000s duration)
+/// 4. Create third stream: sender -> recipient1 (500 tokens, 1 token/sec, 500s duration)
+/// 5. Verify all three streams have distinct IDs (0, 1, 2)
+/// 6. Verify initial balances: sender loses 3500 tokens, contract holds 3500
+/// 7. Advance time and withdraw from stream 1 independently
+/// 8. Advance time and withdraw from stream 0 independently
+/// 9. Verify stream 2 is unaffected by withdrawals from other streams
+/// 10. Withdraw from stream 2 and verify completion
+/// 11. Verify final balances and all recipient accounts
+#[test]
+fn integration_same_sender_multiple_streams() {
+    let ctx = TestContext::setup();
+
+    // Setup additional recipient for testing
+    let recipient2 = Address::generate(&ctx.env);
+
+    // Initial state
+    assert_eq!(ctx.token.balance(&ctx.sender), 10_000);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
+    assert_eq!(ctx.token.balance(&recipient2), 0);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+
+    // === Stream 1: sender -> recipient (1000 tokens, 1 token/sec, start=0, end=1000)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id_0 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    assert_eq!(stream_id_0, 0, "first stream should have id=0");
+
+    // === Stream 2: sender -> recipient2 (2000 tokens, 2 tokens/sec, start=0, end=1000)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id_1 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient2,
+        &2000_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    assert_eq!(stream_id_1, 1, "second stream should have id=1");
+
+    // === Stream 3: sender -> recipient (500 tokens, 1 token/sec, start=0, end=500)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id_2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+    assert_eq!(stream_id_2, 2, "third stream should have id=2");
+
+    // Verify all stream IDs are distinct
+    assert_ne!(stream_id_0, stream_id_1, "stream ids must be unique");
+    assert_ne!(stream_id_1, stream_id_2, "stream ids must be unique");
+    assert_ne!(stream_id_0, stream_id_2, "stream ids must be unique");
+
+    // Verify balances after creating all three streams
+    // Total deposit: 1000 + 2000 + 500 = 3500
+    let sender_balance = ctx.token.balance(&ctx.sender);
+    assert_eq!(sender_balance, 6_500, "sender should have 10000 - 3500");
+    assert_eq!(
+        ctx.token.balance(&ctx.contract_id),
+        3_500,
+        "contract should hold 3500"
+    );
+
+    // === Verify stream metadata for each stream
+    let state_0 = ctx.client().get_stream_state(&stream_id_0);
+    assert_eq!(state_0.stream_id, stream_id_0);
+    assert_eq!(state_0.sender, ctx.sender);
+    assert_eq!(state_0.recipient, ctx.recipient);
+    assert_eq!(state_0.deposit_amount, 1000);
+    assert_eq!(state_0.rate_per_second, 1);
+    assert_eq!(state_0.end_time, 1000);
+    assert_eq!(state_0.withdrawn_amount, 0);
+    assert_eq!(state_0.status, StreamStatus::Active);
+
+    let state_1 = ctx.client().get_stream_state(&stream_id_1);
+    assert_eq!(state_1.stream_id, stream_id_1);
+    assert_eq!(state_1.sender, ctx.sender);
+    assert_eq!(state_1.recipient, recipient2);
+    assert_eq!(state_1.deposit_amount, 2000);
+    assert_eq!(state_1.rate_per_second, 2);
+    assert_eq!(state_1.end_time, 1000);
+    assert_eq!(state_1.withdrawn_amount, 0);
+    assert_eq!(state_1.status, StreamStatus::Active);
+
+    let state_2 = ctx.client().get_stream_state(&stream_id_2);
+    assert_eq!(state_2.stream_id, stream_id_2);
+    assert_eq!(state_2.sender, ctx.sender);
+    assert_eq!(state_2.recipient, ctx.recipient);
+    assert_eq!(state_2.deposit_amount, 500);
+    assert_eq!(state_2.rate_per_second, 1);
+    assert_eq!(state_2.end_time, 500);
+    assert_eq!(state_2.withdrawn_amount, 0);
+    assert_eq!(state_2.status, StreamStatus::Active);
+
+    // === Independent withdrawals from multiple streams
+    // Withdraw from stream_id_1 (recipient2) at t=250 (500 tokens accrued)
+    ctx.env.ledger().set_timestamp(250);
+    let withdrawn_1_at_250 = ctx.client().withdraw(&stream_id_1);
+    assert_eq!(withdrawn_1_at_250, 500);
+
+    let state_1 = ctx.client().get_stream_state(&stream_id_1);
+    assert_eq!(state_1.withdrawn_amount, 500);
+    assert_eq!(state_1.status, StreamStatus::Active);
+    assert_eq!(ctx.token.balance(&recipient2), 500);
+
+    // Verify stream 0 and 2 are unaffected
+    let state_0 = ctx.client().get_stream_state(&stream_id_0);
+    assert_eq!(state_0.withdrawn_amount, 0, "stream 0 should be unaffected");
+
+    let state_2 = ctx.client().get_stream_state(&stream_id_2);
+    assert_eq!(state_2.withdrawn_amount, 0, "stream 2 should be unaffected");
+
+    // Withdraw from stream_id_0 (recipient) at t=300 (300 tokens accrued since start)
+    ctx.env.ledger().set_timestamp(300);
+    let withdrawn_0_at_300 = ctx.client().withdraw(&stream_id_0);
+    assert_eq!(withdrawn_0_at_300, 300);
+
+    let state_0 = ctx.client().get_stream_state(&stream_id_0);
+    assert_eq!(state_0.withdrawn_amount, 300);
+    assert_eq!(state_0.status, StreamStatus::Active);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 300);
+
+    // Verify stream 1 state is preserved (still has 1500 accrued, 500 withdrawn)
+    let state_1 = ctx.client().get_stream_state(&stream_id_1);
+    assert_eq!(state_1.withdrawn_amount, 500);
+    assert_eq!(state_1.status, StreamStatus::Active);
+
+    // Verify stream 2 state is preserved
+    let state_2 = ctx.client().get_stream_state(&stream_id_2);
+    assert_eq!(state_2.withdrawn_amount, 0);
+    assert_eq!(state_2.status, StreamStatus::Active);
+
+    // Verify contract balance reflects withdrawals
+    // Initial: 3500, Withdrawn: 500 + 300 = 800
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 2_700);
+
+    // === Complete stream 2 (should reach end_time at t=500)
+    ctx.env.ledger().set_timestamp(500);
+    let withdrawn_2_at_500 = ctx.client().withdraw(&stream_id_2);
+    assert_eq!(withdrawn_2_at_500, 500);
+
+    let state_2 = ctx.client().get_stream_state(&stream_id_2);
+    assert_eq!(state_2.withdrawn_amount, 500);
+    assert_eq!(state_2.status, StreamStatus::Completed);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 800, "recipient gets 300 + 500");
+
+    // Verify streams 0 and 1 are still active
+    let state_0 = ctx.client().get_stream_state(&stream_id_0);
+    assert_eq!(state_0.status, StreamStatus::Active);
+
+    let state_1 = ctx.client().get_stream_state(&stream_id_1);
+    assert_eq!(state_1.status, StreamStatus::Active);
+
+    // === Complete stream 0 at t=1000
+    ctx.env.ledger().set_timestamp(1000);
+    let withdrawn_0_at_1000 = ctx.client().withdraw(&stream_id_0);
+    assert_eq!(withdrawn_0_at_1000, 700, "700 tokens remaining (1000 - 300)");
+
+    let state_0 = ctx.client().get_stream_state(&stream_id_0);
+    assert_eq!(state_0.withdrawn_amount, 1000);
+    assert_eq!(state_0.status, StreamStatus::Completed);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1500, "recipient gets 800 + 700");
+
+    // === Complete stream 1 at t=1000
+    let withdrawn_1_at_1000 = ctx.client().withdraw(&stream_id_1);
+    assert_eq!(withdrawn_1_at_1000, 1500, "1500 tokens remaining (2000 - 500)");
+
+    let state_1 = ctx.client().get_stream_state(&stream_id_1);
+    assert_eq!(state_1.withdrawn_amount, 2000);
+    assert_eq!(state_1.status, StreamStatus::Completed);
+    assert_eq!(ctx.token.balance(&recipient2), 2000);
+
+    // === Final balance verification
+    assert_eq!(ctx.token.balance(&ctx.sender), 6_500, "sender balance unchanged");
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1500, "recipient total: 300+500+700");
+    assert_eq!(ctx.token.balance(&recipient2), 2000, "recipient2 total: 500+1500");
+    assert_eq!(
+        ctx.token.balance(&ctx.contract_id),
+        0,
+        "contract should be empty after all withdrawals"
+    );
+
+    // Verify total tokens are conserved
+    let total = ctx.token.balance(&ctx.sender)
+        + ctx.token.balance(&ctx.recipient)
+        + ctx.token.balance(&recipient2)
+        + ctx.token.balance(&ctx.contract_id);
+    assert_eq!(total, 10_000, "total tokens must be conserved");
+}
