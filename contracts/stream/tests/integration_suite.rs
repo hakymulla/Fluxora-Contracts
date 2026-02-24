@@ -1,6 +1,7 @@
 extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamStatus};
+#[allow(unused_imports)]
 use soroban_sdk::{
     log,
     testutils::{Address as _, Ledger},
