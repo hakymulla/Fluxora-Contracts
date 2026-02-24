@@ -908,9 +908,17 @@ fn integration_pause_resume_withdraw_lifecycle() {
     let withdrawal_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client().withdraw(&stream_id);
     }));
+    let err = withdrawal_result.expect_err("withdrawal should panic while stream is paused");
+    // Ensure the panic reason matches the expected paused-stream invariant
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .map(|s| *s)
+        .or_else(|| err.downcast_ref::<String>().map(|s| s.as_str()))
+        .unwrap_or("<non-string panic payload>");
     assert!(
-        withdrawal_result.is_err(),
-        "withdrawal should fail while stream is paused"
+        panic_msg.contains("cannot withdraw from paused stream"),
+        "unexpected panic message when withdrawing from paused stream: {}",
+        panic_msg
     );
 
     // Verify stream still paused and no tokens transferred
