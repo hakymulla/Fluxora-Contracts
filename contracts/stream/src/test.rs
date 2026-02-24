@@ -639,6 +639,76 @@ fn test_create_stream_multiple_loop() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests — Issue #123: no hard cap on deposit or duration (policy test)
+// ---------------------------------------------------------------------------
+
+/// The contract must accept a very large deposit_amount (no artificial ceiling).
+/// This verifies the "no hard cap" policy documented in create_stream.
+/// Overflow in accrual math is handled separately by checked_mul + clamping.
+#[test]
+fn test_create_stream_large_deposit_accepted() {
+    let ctx = TestContext::setup();
+
+    // Use a value well above any "reasonable" protocol limit — 10^18 tokens.
+    // The sender must have enough balance; mint it first.
+    let large_deposit: i128 = 1_000_000_000_000_000_000_i128; // 10^18
+    let rate: i128 = 1_000_000_000_i128; // 10^9 / s
+    let duration: u64 = 1_000_000_000; // 10^9 s
+
+    // Confirm deposit exactly covers rate × duration (no excess needed).
+    assert_eq!(large_deposit, rate * duration as i128);
+
+    ctx.sac.mint(&ctx.sender, &large_deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &large_deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, large_deposit);
+    assert_eq!(state.rate_per_second, rate);
+    assert_eq!(state.end_time - state.start_time, duration);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// The contract must accept a very long stream duration (no artificial ceiling).
+/// This verifies the "no hard cap" policy documented in create_stream.
+#[test]
+fn test_create_stream_long_duration_accepted() {
+    let ctx = TestContext::setup();
+
+    // 100 years in seconds — deliberately beyond any "reasonable" UX limit.
+    let duration: u64 = 3_153_600_000;
+    let rate: i128 = 1;
+    let deposit: i128 = rate * duration as i128; // exactly covers duration
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time - state.start_time, duration);
+    assert_eq!(state.deposit_amount, deposit);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+// ---------------------------------------------------------------------------
 // Tests — Issue #44: create_stream validation (invalid params) — full suite
 // ---------------------------------------------------------------------------
 

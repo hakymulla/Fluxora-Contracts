@@ -204,6 +204,19 @@ impl FluxoraStream {
     /// - Setting `cliff_time = start_time` means no cliff (immediate vesting)
     /// - Deposit can exceed minimum required (excess remains in contract)
     /// - Sender must have sufficient token balance and approve contract
+    /// ## Stream Limits Policy
+    /// No hard upper bounds are enforced on `deposit_amount` or stream duration.
+    /// Rationale:
+    /// - Overflow in accrual math is already prevented via `checked_mul` and clamping.
+    /// - A fixed cap would require a contract upgrade to change and conflicts with
+    ///   the overflow test suite, which exercises values up to `i128::MAX`.
+    /// - Protocol-specific limits (e.g. "max 10 M USDC per stream") belong at the
+    ///   application layer (UI or an admin-gated factory contract), where business
+    ///   context is available.
+    ///
+    /// Senders are responsible for the correctness of the values they supply.
+    /// The validations above (`deposit > 0`, `rate > 0`, `deposit >= rate × duration`,
+    /// valid time window) are the contract's complete set of creation constraints.
     ///
     /// # Examples
     /// - Linear stream: 1000 tokens over 1000 seconds, no cliff
