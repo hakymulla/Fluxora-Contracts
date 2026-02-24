@@ -348,7 +348,17 @@ fn test_config_unchanged_after_failed_reinit() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.init(&token_id2, &admin2);
     }));
-    assert!(result.is_err(), "re-init should have panicked");
+    let err = result.expect_err("re-init should have panicked");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| err.downcast_ref::<std::string::String>().map(|s| s.as_str()))
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("already initialised"),
+        "panic message should contain 'already initialised', but was '{}'",
+        panic_msg
+    );
 
     // Config must be identical to the original
     let config_after = client.get_config();
@@ -390,7 +400,17 @@ fn test_operations_work_after_failed_reinit() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.init(&token_id, &admin2);
     }));
-    assert!(result.is_err(), "re-init should have panicked");
+    let err = result.expect_err("re-init should have panicked");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| err.downcast_ref::<std::string::String>().map(|s| s.as_str()))
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("already initialised"),
+        "panic message should contain 'already initialised', but was '{}'",
+        panic_msg
+    );
 
     // Contract must still accept streams
     env.ledger().set_timestamp(0);
@@ -4661,7 +4681,17 @@ fn test_failed_create_stream_does_not_advance_counter() {
             &100u64,
         );
     }));
-    assert!(result.is_err(), "underfunded create_stream must panic");
+    let err = result.expect_err("underfunded create_stream must panic");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| err.downcast_ref::<std::string::String>().map(|s| s.as_str()))
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("deposit_amount must cover total streamable amount"),
+        "panic message should contain 'deposit_amount must cover total streamable amount', but was '{}'",
+        panic_msg
+    );
 
     // Next successful stream must still be id = 1, not 2
     let id1 = ctx.client().create_stream(
