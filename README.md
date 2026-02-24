@@ -40,13 +40,18 @@ WASM output is under `target/wasm32-unknown-unknown/release/fluxora_stream.wasm`
 
 ### Test
 
+To run all tests (unit and integration tests), use:
+
 ```bash
 cargo test -p fluxora_stream
 ```
 
-This runs both:
-- Unit tests in `contracts/stream/src/test.rs`
-- Integration tests in `contracts/stream/tests/integration_suite.rs`
+**Note:** Tests rely on the `testutils` feature of the `soroban-sdk` to simulate the ledger environment and manipulate time (e.g., fast-forwarding to test cliff and end periods). 
+This feature is already enabled in `contracts/stream/Cargo.toml` under `[dev-dependencies]`. No extra environment setup is required.
+
+The test files are located at:
+- Unit tests: `contracts/stream/src/test.rs`
+- Integration tests: `contracts/stream/tests/integration_suite.rs`
 
 The integration suite invokes the contract with Soroban `testutils` and covers:
 - `init`
