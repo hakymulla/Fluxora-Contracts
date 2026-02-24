@@ -75,6 +75,8 @@ Then invoke `init` with token and admin addresses, and use `create_stream`, `wit
 ```
 fluxora-contracts/
   Cargo.toml              # workspace
+  docs/
+    storage.md            # storage layout and key design
   contracts/
     stream/
       Cargo.toml
@@ -84,6 +86,10 @@ fluxora-contracts/
       tests/
         integration_suite.rs  # integration tests (Soroban testutils)
 ```
+
+## Documentation
+
+- **[Storage Layout](docs/storage.md)** — Contract storage architecture, key design, and TTL policies
 
 ## Accrual formula (reference)
 
