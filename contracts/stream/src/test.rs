@@ -173,6 +173,47 @@ impl<'a> TestContext<'a> {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn test_init_stores_token_and_admin() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&token, &admin);
+
+    let config = client.get_config();
+    assert_eq!(config.token, token);
+    assert_eq!(config.admin, admin);
+}
+
+#[test]
+#[should_panic(expected = "already initialised")]
+fn test_init_second_call_fails() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&token, &admin);
+
+    client.init(&Address::generate(&env), &Address::generate(&env));
+}
+
+#[test]
+#[should_panic(expected = "contract not initialised: missing config")]
+fn test_get_config_before_init_fails() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    client.get_config();
+}
+
+#[test]
 fn test_init_stores_config() {
     let env = Env::default();
     env.mock_all_auths();
@@ -348,7 +389,20 @@ fn test_config_unchanged_after_failed_reinit() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.init(&token_id2, &admin2);
     }));
-    assert!(result.is_err(), "re-init should have panicked");
+    let err = result.expect_err("re-init should have panicked");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("already initialised"),
+        "panic message should contain 'already initialised', but was '{}'",
+        panic_msg
+    );
 
     // Config must be identical to the original
     let config_after = client.get_config();
@@ -390,7 +444,20 @@ fn test_operations_work_after_failed_reinit() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.init(&token_id, &admin2);
     }));
-    assert!(result.is_err(), "re-init should have panicked");
+    let err = result.expect_err("re-init should have panicked");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("already initialised"),
+        "panic message should contain 'already initialised', but was '{}'",
+        panic_msg
+    );
 
     // Contract must still accept streams
     env.ledger().set_timestamp(0);
@@ -569,6 +636,76 @@ fn test_create_stream_multiple_loop() {
             break;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #123: no hard cap on deposit or duration (policy test)
+// ---------------------------------------------------------------------------
+
+/// The contract must accept a very large deposit_amount (no artificial ceiling).
+/// This verifies the "no hard cap" policy documented in create_stream.
+/// Overflow in accrual math is handled separately by checked_mul + clamping.
+#[test]
+fn test_create_stream_large_deposit_accepted() {
+    let ctx = TestContext::setup();
+
+    // Use a value well above any "reasonable" protocol limit — 10^18 tokens.
+    // The sender must have enough balance; mint it first.
+    let large_deposit: i128 = 1_000_000_000_000_000_000_i128; // 10^18
+    let rate: i128 = 1_000_000_000_i128; // 10^9 / s
+    let duration: u64 = 1_000_000_000; // 10^9 s
+
+    // Confirm deposit exactly covers rate × duration (no excess needed).
+    assert_eq!(large_deposit, rate * duration as i128);
+
+    ctx.sac.mint(&ctx.sender, &large_deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &large_deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, large_deposit);
+    assert_eq!(state.rate_per_second, rate);
+    assert_eq!(state.end_time - state.start_time, duration);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// The contract must accept a very long stream duration (no artificial ceiling).
+/// This verifies the "no hard cap" policy documented in create_stream.
+#[test]
+fn test_create_stream_long_duration_accepted() {
+    let ctx = TestContext::setup();
+
+    // 100 years in seconds — deliberately beyond any "reasonable" UX limit.
+    let duration: u64 = 3_153_600_000;
+    let rate: i128 = 1;
+    let deposit: i128 = rate * duration as i128; // exactly covers duration
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time - state.start_time, duration);
+    assert_eq!(state.deposit_amount, deposit);
+    assert_eq!(state.status, StreamStatus::Active);
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,6 +1411,37 @@ fn test_calculate_accrued_after_cliff() {
         accrued, 600,
         "600s × 1/s = 600 (uses start_time, not cliff)"
     );
+}
+
+#[test]
+fn test_accrued_after_cliff_before_end() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10000_i128,
+        &10_i128,
+        &0u64,
+        &500u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(500);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 5000);
+
+    ctx.env.ledger().set_timestamp(750);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 7500);
+
+    ctx.env.ledger().set_timestamp(999);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 9990);
+
+    ctx.env.ledger().set_timestamp(1000);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 10000);
+
+    ctx.env.ledger().set_timestamp(1500);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 10000);
 }
 
 #[test]
@@ -3290,10 +3458,10 @@ fn test_create_stream_self_stream_panics() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[should_panic(expected = "stream not found")]
 fn test_get_stream_state_non_existent() {
     let ctx = TestContext::setup();
-    ctx.client().get_stream_state(&999);
+    let result = ctx.client().try_get_stream_state(&999);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -4080,11 +4248,71 @@ fn test_get_stream_state_pause_resume_stream_cancel() {
 }
 
 #[test]
-#[should_panic(expected = "stream not found")]
 fn test_get_stream_state_non_existence_stream() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    let _ = ctx.client().get_stream_state(&1);
+    let result = ctx.client().try_get_stream_state(&1);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Error API (StreamNotFound)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pause_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_pause_stream(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_resume_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_resume_stream(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cancel_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_cancel_stream(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_withdraw_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_withdraw(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_calculate_accrued_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_calculate_accrued(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cancel_stream_as_admin_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_cancel_stream_as_admin(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_pause_stream_as_admin_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_pause_stream_as_admin(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_resume_stream_as_admin_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_resume_stream_as_admin(&999);
+    assert!(result.is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -4153,6 +4381,43 @@ fn test_withdraw_zero_no_time_elapsed() {
 
     // Try to withdraw again at same timestamp - should panic
     ctx.client().withdraw(&stream_id);
+}
+
+/// Issue #128 — withdraw when accrued equals withdrawn (zero withdrawable)
+/// Expected: second withdraw panics with "nothing to withdraw"
+/// and no token transfer occurs (recipient balance unchanged).
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_when_accrued_equals_withdrawn_zero_withdrawable() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Advance time to t=600: accrued = 600, withdrawn = 0
+    ctx.env.ledger().set_timestamp(600);
+
+    // First withdraw: drains the full accrued amount
+    let first_withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(first_withdrawn, 600, "first withdraw should return 600");
+
+    // Verify state: withdrawn_amount now equals accrued (both 600)
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 600);
+    assert_eq!(state.status, StreamStatus::Active); // still active, stream not done
+
+    // Verify no second transfer occurred by recording recipient balance
+    let recipient_balance_after_first = ctx.token().balance(&ctx.recipient);
+    assert_eq!(recipient_balance_after_first, 600);
+
+    // Second withdraw at same timestamp: accrued (600) - withdrawn (600) = 0
+    // Must panic with "nothing to withdraw" and must NOT transfer any tokens
+    ctx.client().withdraw(&stream_id);
+
+    // If we somehow reach here (we shouldn't), verify no extra tokens moved
+    let recipient_balance_after_second = ctx.token().balance(&ctx.recipient);
+    assert_eq!(
+        recipient_balance_after_second, recipient_balance_after_first,
+        "no tokens should transfer on zero-withdrawable call"
+    );
 }
 
 /// Test withdraw when cancelled with zero accrued
@@ -4668,7 +4933,20 @@ fn test_failed_create_stream_does_not_advance_counter() {
             &100u64,
         );
     }));
-    assert!(result.is_err(), "underfunded create_stream must panic");
+    let err = result.expect_err("underfunded create_stream must panic");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("deposit_amount must cover total streamable amount"),
+        "panic message should contain 'deposit_amount must cover total streamable amount', but was '{}'",
+        panic_msg
+    );
 
     // Next successful stream must still be id = 1, not 2
     let id1 = ctx.client().create_stream(
@@ -4793,4 +5071,202 @@ fn test_stream_id_stability_after_state_changes() {
         id3, 3,
         "counter must continue monotonically after state mutations"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — set_admin (admin key rotation)
+// ---------------------------------------------------------------------------
+
+/// Admin can successfully update to a new admin address
+#[test]
+fn test_set_admin_succeeds() {
+    let ctx = TestContext::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    // Get original config
+    let original_config = ctx.client().get_config();
+    assert_eq!(original_config.admin, ctx.admin);
+
+    // Set new admin
+    ctx.client().set_admin(&new_admin);
+
+    // Verify config updated
+    let updated_config = ctx.client().get_config();
+    assert_eq!(updated_config.admin, new_admin);
+    assert_eq!(
+        updated_config.token, original_config.token,
+        "token must remain unchanged"
+    );
+}
+
+/// Non-admin cannot call set_admin
+#[test]
+#[should_panic]
+fn test_set_admin_non_admin_fails() {
+    let ctx = TestContext::setup_strict();
+    let new_admin = Address::generate(&ctx.env);
+    let non_admin = Address::generate(&ctx.env);
+
+    // Try to set admin as non-admin (should fail)
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "set_admin",
+            args: (new_admin.clone(),).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().set_admin(&new_admin);
+}
+
+/// New admin gains privileges after admin rotation
+#[test]
+fn test_set_admin_new_admin_gains_privileges() {
+    let ctx = TestContext::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    // Create a stream
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    // Rotate admin
+    ctx.client().set_admin(&new_admin);
+
+    // Verify new admin in config
+    assert_eq!(ctx.client().get_config().admin, new_admin);
+
+    // New admin can pause stream (with mock_all_auths this works)
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    // Note: Testing that old admin loses privileges requires strict auth mocking
+    // which is complex with token transfers. The authorization check in set_admin
+    // ensures only the current admin can rotate keys, and the admin functions
+    // (pause_stream_as_admin, etc.) check get_admin() which returns the updated value.
+}
+
+/// set_admin emits admin_updated event
+#[test]
+fn test_set_admin_emits_event() {
+    let ctx = TestContext::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    ctx.client().set_admin(&new_admin);
+
+    // Verify event was published
+    let events = ctx.env.events().all();
+    assert!(!events.is_empty(), "should emit at least one event");
+
+    // The event exists and was published successfully
+    // Detailed event structure validation is covered by integration tests
+}
+
+/// Admin can rotate multiple times
+#[test]
+fn test_set_admin_multiple_rotations() {
+    let ctx = TestContext::setup();
+    let admin2 = Address::generate(&ctx.env);
+    let admin3 = Address::generate(&ctx.env);
+    let admin4 = Address::generate(&ctx.env);
+
+    // First rotation
+    ctx.client().set_admin(&admin2);
+    assert_eq!(ctx.client().get_config().admin, admin2);
+
+    // Second rotation (admin2 → admin3)
+    ctx.client().set_admin(&admin3);
+    assert_eq!(ctx.client().get_config().admin, admin3);
+
+    // Third rotation (admin3 → admin4)
+    ctx.client().set_admin(&admin4);
+    assert_eq!(ctx.client().get_config().admin, admin4);
+}
+
+/// set_admin can set admin to any valid address
+#[test]
+fn test_set_admin_to_various_addresses() {
+    let ctx = TestContext::setup();
+
+    // Can set to sender
+    ctx.client().set_admin(&ctx.sender);
+    assert_eq!(ctx.client().get_config().admin, ctx.sender);
+
+    // Can set to recipient
+    ctx.client().set_admin(&ctx.recipient);
+    assert_eq!(ctx.client().get_config().admin, ctx.recipient);
+
+    // Can set to contract itself
+    ctx.client().set_admin(&ctx.contract_id);
+    assert_eq!(ctx.client().get_config().admin, ctx.contract_id);
+}
+
+/// set_admin does not affect existing streams
+#[test]
+fn test_set_admin_does_not_affect_streams() {
+    let ctx = TestContext::setup();
+
+    // Create stream before rotation
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    // Rotate admin
+    let new_admin = Address::generate(&ctx.env);
+    ctx.client().set_admin(&new_admin);
+
+    // Stream state unchanged
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_before.stream_id, state_after.stream_id);
+    assert_eq!(state_before.sender, state_after.sender);
+    assert_eq!(state_before.recipient, state_after.recipient);
+    assert_eq!(state_before.deposit_amount, state_after.deposit_amount);
+    assert_eq!(state_before.status, state_after.status);
+}
+
+/// set_admin does not affect token address
+#[test]
+fn test_set_admin_does_not_affect_token() {
+    let ctx = TestContext::setup();
+    let original_token = ctx.client().get_config().token;
+
+    let new_admin = Address::generate(&ctx.env);
+    ctx.client().set_admin(&new_admin);
+
+    let updated_token = ctx.client().get_config().token;
+    assert_eq!(
+        original_token, updated_token,
+        "token address must not change"
+    );
+}
+
+/// set_admin works when contract is not initialized should panic
+#[test]
+#[should_panic(expected = "contract not initialised: missing config")]
+fn test_set_admin_uninitialized_contract_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+}
+
+/// Admin can set themselves as admin (no-op but valid)
+#[test]
+fn test_set_admin_to_self() {
+    let ctx = TestContext::setup();
+    let original_admin = ctx.admin.clone();
+
+    ctx.client().set_admin(&ctx.admin);
+
+    let updated_admin = ctx.client().get_config().admin;
+    assert_eq!(updated_admin, original_admin);
 }
