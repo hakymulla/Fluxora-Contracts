@@ -18,6 +18,8 @@ Implementation is scaffolded; storage, token transfers, and events are left for 
 - **Methods** — `init`, `create_stream`, `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, `set_admin`.
 - **Admin functions** — `pause_stream_as_admin`, `resume_stream_as_admin`, `cancel_stream_as_admin`, `set_admin` for key rotation.
 
+**Documentation:** [Audit preparation](docs/audit.md) (entrypoints and invariants for auditors).
+
 ## Tech stack
 
 - Rust (edition 2021)
