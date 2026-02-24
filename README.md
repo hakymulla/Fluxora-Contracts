@@ -17,46 +17,61 @@ Implementation is scaffolded; storage, token transfers, and events are left for 
 - [soroban-sdk](https://docs.rs/soroban-sdk) (Stellar Soroban)
 - Build target: `wasm32-unknown-unknown` for deployment
 
-## Local setup
+## Local development and testing
 
-### Prerequisites
+Everything below runs locally. **No secrets or mainnet access are required** to build or test.
 
-- Rust 1.70+
-- [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools) (optional, for deploy/test on network)
+### Clone and prerequisites
+
+```bash
+git clone https://github.com/Fluxora-Org/Fluxora-Contracts.git
+cd Fluxora-Contracts
+```
+
+- **Rust 1.70+** (install from [rustup.rs](https://rustup.rs))
+- Add the Soroban build target:
 
 ```bash
 rustup target add wasm32-unknown-unknown
 ```
+
+[Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools) is optional and only needed if you want to deploy to testnet later.
 
 ### Build
 
 From the repo root:
 
 ```bash
+# Development build (faster compile, for local testing)
+cargo build -p fluxora_stream
+
+# Release build (optimized WASM for deployment)
 cargo build --release -p fluxora_stream
 ```
 
-WASM output is under `target/wasm32-unknown-unknown/release/fluxora_stream.wasm`.
+Release WASM output: `target/wasm32-unknown-unknown/release/fluxora_stream.wasm`.
 
-### Test
+### Run tests
 
 ```bash
 cargo test -p fluxora_stream
 ```
 
-This runs both:
-- Unit tests in `contracts/stream/src/test.rs`
-- Integration tests in `contracts/stream/tests/integration_suite.rs`
+This runs **unit tests** and **integration tests** in one go. No environment variables or external services are required. Integration tests use Soroban’s in-process test environment (`soroban_sdk::testutils`): the contract and a mock Stellar asset are built in memory, so no emulator or network is needed.
 
-The integration suite invokes the contract with Soroban `testutils` and covers:
-- `init`
-- `create_stream`
-- `withdraw`
-- `get_stream_state`
-- A full stream lifecycle from create to completed withdrawal
-- Key edge cases (`init` twice, pre-cliff withdrawal, unknown stream id, underfunded deposit)
+- **Unit tests**: `contracts/stream/src/test.rs` (contract logic, accrual, auth, edge cases).
+- **Integration tests**: `contracts/stream/tests/integration_suite.rs` — full flows with `init`, `create_stream`, `withdraw`, `get_stream_state`, lifecycle and edge cases (double init, pre-cliff withdraw, unknown stream id, underfunded deposit).
 
-### Deploy (after Stellar CLI setup)
+To run only unit tests or only the integration suite:
+
+```bash
+cargo test -p fluxora_stream --lib
+cargo test -p fluxora_stream --test integration_suite
+```
+
+### Optional: deploy to testnet
+
+If you have the Stellar CLI configured (no secrets required in the repo):
 
 ```bash
 stellar contract deploy \
@@ -64,7 +79,7 @@ stellar contract deploy \
   --network testnet
 ```
 
-Then invoke `init` with token and admin addresses, and use `create_stream`, `withdraw`, etc. as needed.
+Then call `init` with your token and admin addresses, and use `create_stream`, `withdraw`, etc. as needed.
 
 ## Project structure
 
