@@ -215,7 +215,7 @@ fn test_get_config_before_init_fails() {
 
 /// Test that get_config panics with clear error when contract is not initialized.
 /// This guards against using an uninitialized contract and documents expected behavior.
-/// 
+///
 /// Security: Prevents operations on uninitialized contract state.
 /// The panic message "contract not initialised: missing config" provides clear
 /// feedback to integrators that init() must be called first.
