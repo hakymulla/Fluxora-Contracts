@@ -7,7 +7,7 @@ use soroban_sdk::{
     Address, Env, FromVal, TryFromVal, Vec,
 };
 
-use crate::{FluxoraStream, FluxoraStreamClient, StreamCreated, StreamEvent, StreamStatus};
+use crate::{FluxoraStream, FluxoraStreamClient, StreamEvent, StreamStatus};
 
 // ---------------------------------------------------------------------------
 // Test helpers
