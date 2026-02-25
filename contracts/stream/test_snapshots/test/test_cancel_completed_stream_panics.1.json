@@ -247,6 +247,12 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "cancelled_at"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "cliff_time"
                       },
                       "val": {
@@ -1540,7 +1546,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'stream must be active or paused to cancel' from contract function 'Symbol(obj#431)'"
+                  "string": "caught panic 'stream must be active or paused to cancel' from contract function 'Symbol(obj#439)'"
                 },
                 {
                   "u64": 0
