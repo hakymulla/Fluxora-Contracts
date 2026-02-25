@@ -79,24 +79,21 @@ The test files are located at:
 - **Unit tests**: `contracts/stream/src/test.rs` (contract logic, accrual, auth, edge cases).
 - **Integration tests**: `contracts/stream/tests/integration_suite.rs` — full flows with `init`, `create_stream`, `withdraw`, `get_stream_state`, lifecycle and edge cases (double init, pre-cliff withdraw, unknown stream id, underfunded deposit).
 
-To run only unit tests or only the integration suite:
+### Deploy to Stellar Testnet
+
+> **📋 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a complete step-by-step deployment checklist**, including build, deploy, init, and verification steps.
+
+Quick start:
 
 ```bash
-cargo test -p fluxora_stream --lib
-cargo test -p fluxora_stream --test integration_suite
+cp .env.example .env
+# Edit .env with your STELLAR_SECRET_KEY, STELLAR_TOKEN_ADDRESS, STELLAR_ADMIN_ADDRESS
+
+source .env
+bash script/deploy-testnet.sh
 ```
 
-### Optional: deploy to testnet
-
-If you have the Stellar CLI configured (no secrets required in the repo):
-
-```bash
-stellar contract deploy \
-  --wasm-file target/wasm32-unknown-unknown/release/fluxora_stream.wasm \
-  --network testnet
-```
-
-Then call `init` with your token and admin addresses, and use `create_stream`, `withdraw`, etc. as needed.
+Then invoke `create_stream`, `withdraw`, etc. as needed. Contract ID is saved to `.contract_id`.
 
 ## Project structure
 
