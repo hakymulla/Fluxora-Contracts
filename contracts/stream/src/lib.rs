@@ -2,9 +2,28 @@
 
 mod accrual;
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
+
+// ---------------------------------------------------------------------------
+// TTL constants
+// ---------------------------------------------------------------------------
+
+/// Minimum remaining TTL (in ledgers) before we bump.  ~1 day at 5 s/ledger.
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
+/// Extend to ~7 days of ledgers when bumping instance storage.
+const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
+/// Minimum remaining TTL for persistent (stream) entries.
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
+/// Extend persistent entries to ~7 days of ledgers.
+const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+// Contract version
+// ---------------------------------------------------------------------------
+
+/// Compile-time contract version number.
+///
+/// Increment this constant whenever a breaking change is deployed so that
+/// frontends and scripts can detect which version is running on-chain.
+pub const CONTRACT_VERSION: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -103,7 +122,16 @@ pub enum DataKey {
 // Storage helpers
 // ---------------------------------------------------------------------------
 
+/// Extend instance storage TTL so Config and NextStreamId do not expire.
+/// Called on every entry-point that reads or writes instance storage.
+fn bump_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
 fn get_config(env: &Env) -> Config {
+    bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&DataKey::Config)
@@ -119,6 +147,7 @@ fn get_admin(env: &Env) -> Address {
 }
 
 fn get_stream_count(env: &Env) -> u64 {
+    bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&DataKey::NextStreamId)
@@ -127,21 +156,37 @@ fn get_stream_count(env: &Env) -> u64 {
 
 fn set_stream_count(env: &Env, count: u64) {
     env.storage().instance().set(&DataKey::NextStreamId, &count);
+    bump_instance_ttl(env);
 }
 
 fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
-    env.storage()
+    let key = DataKey::Stream(stream_id);
+    let stream: Stream = env
+        .storage()
         .persistent()
-        .get(&DataKey::Stream(stream_id))
-        .ok_or(ContractError::StreamNotFound)
+        .get(&key)
+        .ok_or(ContractError::StreamNotFound)?;
+
+    // Bump TTL on read so actively-queried streams don't expire
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+
+    Ok(stream)
 }
 
 fn save_stream(env: &Env, stream: &Stream) {
     let key = DataKey::Stream(stream.stream_id);
     env.storage().persistent().set(&key, stream);
 
-    // Requirement from Issue #1: extend TTL on stream save to ensure persistence
-    env.storage().persistent().extend_ttl(&key, 17280, 120960);
+    // Extend TTL on stream save to ensure persistence
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -272,8 +317,8 @@ impl FluxoraStream {
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
 
-        // Ensure instance storage (Config/ID) doesn't expire quickly
-        env.storage().instance().extend_ttl(17280, 120960);
+        // Ensure instance storage (Config / NextStreamId) doesn't expire quickly
+        bump_instance_ttl(&env);
     }
 
     /// Create a new payment stream with specified parameters.
@@ -486,13 +531,9 @@ impl FluxoraStream {
 
         Self::require_sender_or_admin(&env, &stream.sender);
 
-        if stream.status == StreamStatus::Paused {
-            panic!("stream is already paused");
-        }
-
         assert!(
             stream.status == StreamStatus::Active,
-            "stream must be active to pause"
+            "stream is not active"
         );
 
         stream.status = StreamStatus::Paused;
@@ -608,16 +649,13 @@ impl FluxoraStream {
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.status = StreamStatus::Cancelled;
+        stream.cancelled_at = Some(env.ledger().timestamp());
         save_stream(&env, &stream);
 
         if unstreamed > 0 {
             let token_client = token::Client::new(&env, &get_token(&env));
             token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
         }
-
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(env.ledger().timestamp());
-        save_stream(&env, &stream);
 
         env.events().publish(
             (symbol_short!("cancelled"), stream_id),
@@ -702,12 +740,9 @@ impl FluxoraStream {
         let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
         let withdrawable = accrued - stream.withdrawn_amount;
 
-        // Handle zero withdrawable: return 0 without transfer or state change (idempotent).
+        // Handle zero withdrawable: panic if nothing to withdraw
         // This occurs before cliff or when all accrued funds have been withdrawn.
-        // Frontends can safely call withdraw without checking balance first.
-        if withdrawable == 0 {
-            return Ok(0);
-        }
+        assert!(withdrawable > 0, "nothing to withdraw");
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.withdrawn_amount += withdrawable;
@@ -740,7 +775,7 @@ impl FluxoraStream {
     ///
     /// | Status      | Return value                                         |
     /// |-------------|------------------------------------------------------|
-    /// | `Active`    | `min((now - start) × rate, deposit_amount)`          |
+    /// | `Active`    | `min((min(now,end)-start) × rate, deposit_amount)`   |
     /// | `Paused`    | Same time-based formula (accrual is not paused)      |
     /// | `Completed` | `deposit_amount` — all tokens were accrued/withdrawn |
     /// | `Cancelled` | Final accrued at cancellation timestamp (frozen value) |
@@ -754,7 +789,7 @@ impl FluxoraStream {
     /// # Calculation
     /// - Before `cliff_time`: returns 0 (no accrual before cliff)
     /// - After `cliff_time`: `min((now - start_time) × rate_per_second, deposit_amount)`
-    /// - After `end_time`: capped at `deposit_amount` (no accrual beyond end)
+    /// - After `end_time`: elapsed time is capped at `end_time` (no accrual beyond end)
     ///
     /// # Panics
     /// - If the stream does not exist (`stream_id` is invalid)
@@ -772,7 +807,7 @@ impl FluxoraStream {
     /// - At t=300: returns 0 (before cliff)
     /// - At t=500: returns 500 (at cliff, accrual from start_time)
     /// - At t=800: returns 800
-    /// - At t=1500: returns 1000 (capped at deposit_amount)
+    /// - At t=1500: returns 1000 (elapsed time capped at end_time)
     /// ## Rationale for `Completed`
     /// When a stream reaches `Completed`, `withdrawn_amount == deposit_amount`.
     /// There is no further accrual possible. Returning `deposit_amount` is the
@@ -785,9 +820,7 @@ impl FluxoraStream {
         }
 
         let now = if stream.status == StreamStatus::Cancelled {
-            stream
-                .cancelled_at
-                .expect("cancelled stream missing cancelled_at timestamp")
+            stream.cancelled_at.ok_or(ContractError::InvalidState)?
         } else {
             env.ledger().timestamp()
         };
@@ -868,6 +901,9 @@ impl FluxoraStream {
         config.admin = new_admin.clone();
         env.storage().instance().set(&DataKey::Config, &config);
 
+        // Bump TTL after instance write
+        bump_instance_ttl(&env);
+
         // Emit event with old and new admin addresses
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("updated")),
@@ -909,8 +945,26 @@ impl FluxoraStream {
     ///   - `Paused`: Temporarily halted, no withdrawals allowed
     ///   - `Completed`: All tokens withdrawn, terminal state
     ///   - `Cancelled`: Terminated early, unstreamed tokens refunded, terminal state
-    pub fn get_stream_state(env: Env, stream_id: u64) -> Result<Stream, ContractError> {
-        load_stream(&env, stream_id)
+    pub fn get_stream_state(env: Env, stream_id: u64) -> Stream {
+        load_stream(&env, stream_id).expect("stream not found")
+    }
+
+    /// Return the contract version number.
+    ///
+    /// Reads the compile-time `CONTRACT_VERSION` constant — no storage access required.
+    /// Frontends and deployment scripts can call this to confirm which version of the
+    /// contract is currently deployed before interacting with it.
+    ///
+    /// # Returns
+    /// - `u32`: The current contract version (currently `1`)
+    ///
+    /// # Usage Notes
+    /// - This is a view function (read-only, no state changes)
+    /// - No authorization required (public information)
+    /// - Version is a compile-time constant; calling this costs minimal gas
+    /// - Increment `CONTRACT_VERSION` and redeploy when introducing breaking changes
+    pub fn version(_env: Env) -> u32 {
+        CONTRACT_VERSION
     }
 
     /// Internal helper to check authorization for sender or admin.
@@ -920,9 +974,9 @@ impl FluxoraStream {
         sender.require_auth();
     }
 
-    fn require_cancellable_status(env: &Env, status: StreamStatus) {
+    fn require_cancellable_status(_env: &Env, status: StreamStatus) {
         if status != StreamStatus::Active && status != StreamStatus::Paused {
-            panic_with_error!(env, ContractError::InvalidState);
+            panic!("stream must be active or paused to cancel");
         }
     }
 }
@@ -979,6 +1033,7 @@ impl FluxoraStream {
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.status = StreamStatus::Cancelled;
+        stream.cancelled_at = Some(env.ledger().timestamp());
         save_stream(&env, &stream);
 
         if unstreamed > 0 {
